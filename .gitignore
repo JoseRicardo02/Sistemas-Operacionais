@@ -1,0 +1,13 @@
+toytrace
+toytrace-solution
+
+*.o
+*.solution.o
+
+tests/unit/test_student
+tests/unit/test_student_solution
+
+tests/targets/exec_echo
+tests/targets/failed_open
+tests/targets/hello_write
+tests/targets/open_hosts
