@@ -13,6 +13,11 @@
 #error "Este runtime didatico suporta apenas Linux x86_64."
 #endif
 
+#define WAIT_ERROR -1
+#define WAIT_FINISHED 0
+#define WAIT_SYSCALL 1
+#define WAIT_OTHER_STOP 2
+
 static void fill_event_from_regs(pid_t pid,
                                  int entering,
                                  const struct user_regs_struct *regs,
@@ -72,7 +77,7 @@ static int wait_for_initial_stop(pid_t child)
 
 static int configure_trace_options(pid_t child)
 {
-   long result;
+    long result;
 
     result = ptrace(PTRACE_SETOPTIONS,
                     child,
@@ -89,7 +94,7 @@ static int configure_trace_options(pid_t child)
 
 static int resume_until_next_syscall(pid_t child, int signal_to_deliver)
 {
-   long result;
+    long result;
 
     result = ptrace(PTRACE_SYSCALL,
                     child,
@@ -104,35 +109,42 @@ static int resume_until_next_syscall(pid_t child, int signal_to_deliver)
     return 0;
 }
 
-static int wait_for_syscall_stop(pid_t child, int *status)
+static int wait_for_syscall_stop(pid_t child,
+                                 int *status,
+                                 int *signal_to_deliver)
 {
     pid_t waited;
     int signal_number;
+
+    *signal_to_deliver = 0;
 
     waited = waitpid(child, status, 0);
 
     if (waited < 0) {
         perror("waitpid");
-        return -1;
+        return WAIT_ERROR;
     }
 
     if (WIFEXITED(*status) || WIFSIGNALED(*status)) {
-        return 0;
+        return WAIT_FINISHED;
     }
 
     if (WIFSTOPPED(*status)) {
         signal_number = WSTOPSIG(*status);
 
-        if (signal_number == (SIGTRAP | 0x80)) {
-            return 1;
+        if (signal_number & 0x80) {
+            return WAIT_SYSCALL;
         }
 
         if (signal_number == SIGTRAP) {
-            return 1;
+            return WAIT_OTHER_STOP;
         }
+
+        *signal_to_deliver = signal_number;
+        return WAIT_OTHER_STOP;
     }
 
-    return 1;
+    return WAIT_OTHER_STOP;
 }
 
 int trace_program(char *const argv[],
@@ -142,6 +154,7 @@ int trace_program(char *const argv[],
     pid_t child;
     int status = 0;
     int entering = 1;
+    int signal_to_deliver = 0;
 
     if (argv == NULL || argv[0] == NULL) {
         fprintf(stderr, "erro: programa alvo ausente\n");
@@ -170,11 +183,11 @@ int trace_program(char *const argv[],
         struct syscall_event ev;
         int stop_kind;
 
-        stop_kind = wait_for_syscall_stop(child, &status);
-        if (stop_kind < 0) {
+        stop_kind = wait_for_syscall_stop(child, &status, &signal_to_deliver);
+        if (stop_kind == WAIT_ERROR) {
             return -1;
         }
-        if (stop_kind == 0) {
+        if (stop_kind == WAIT_FINISHED) {
             if (WIFEXITED(status)) {
                 return WEXITSTATUS(status);
             }
@@ -182,6 +195,12 @@ int trace_program(char *const argv[],
                 return 128 + WTERMSIG(status);
             }
             return 0;
+        }
+        if (stop_kind == WAIT_OTHER_STOP) {
+            if (resume_until_next_syscall(child, signal_to_deliver) < 0) {
+                return -1;
+            }
+            continue;
         }
 
         /*
